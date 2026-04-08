@@ -109,7 +109,7 @@ async def scrape_table():
                     record[col] = (idx >= 0 && idx < cellArr.length) ? cellArr[idx] : '';
                 }}
 
-                if (record['币种'] && record['添加时间']) {{
+                if (record['币种'] && (record['添加时间'] || record['最后更新时间'])) {{
                     results.push(record);
                 }}
             }});
@@ -127,7 +127,8 @@ async def scrape_table():
 
 
 def make_row_id(row):
-    return f"{row.get('币种', '').strip()}_{row.get('添加时间', '').strip()}"
+    time = row.get('添加时间', '').strip() or row.get('最后更新时间', '').strip()
+    return f"{row.get('币种', '').strip()}_{time}"
 
 
 async def main():
