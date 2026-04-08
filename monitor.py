@@ -192,7 +192,21 @@ async def main():
             new_trigger = row.get("入场Trigger", "")
             update_time = row.get("最后更新时间", "-")
 
-            if old_status and new_status and old_status != new_status:
+            status_changed = bool(old_status and new_status and old_status != new_status)
+            plan_changed = bool((old_plan != new_plan or old_trigger != new_trigger) and (new_plan or new_trigger))
+
+            if status_changed and plan_changed:
+                msg = (
+                    f"🔄 [Notion监控] 记录变更\n"
+                    f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
+                    f"状态：{old_status} → {new_status}\n"
+                    f"入场：{new_trigger or '-'}\n"
+                    f"计划：{new_plan or '-'}\n"
+                    f"更新时间：{update_time}"
+                )
+                messages.append(msg)
+                print(f"状态+计划变更: {row_id}")
+            elif status_changed:
                 msg = (
                     f"🔄 [Notion监控] 交易状态变更\n"
                     f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
@@ -201,12 +215,11 @@ async def main():
                 )
                 messages.append(msg)
                 print(f"状态变更: {row_id}: {old_status} → {new_status}")
-
-            if (old_plan != new_plan or old_trigger != new_trigger) and (new_plan or new_trigger):
+            elif plan_changed:
                 msg = (
                     f"📝 [Notion监控] 交易计划变更\n"
                     f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
-                    f"状态：{new_status or row.get('交易状态', '-')}\n"
+                    f"状态：{row.get('交易状态', '-')}\n"
                     f"入场：{new_trigger or '-'}\n"
                     f"计划：{new_plan or '-'}\n"
                     f"更新时间：{update_time}"
