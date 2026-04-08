@@ -4,12 +4,16 @@ import json
 import os
 import sys
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from playwright.async_api import async_playwright
+
+TZ_CN = timezone(timedelta(hours=8))
 
 NOTION_URL = "https://road-halibut-51b.notion.site/332e12d2634480f6b247fccac41119fa?v=332e12d2634480749135000cb753c8c8"
 WECOM_WEBHOOK = os.environ.get("WECOM_WEBHOOK")
 STATE_FILE = "state.json"
+
+SCRAPE_COLS = ['币种', '做单方向', '交易状态', '入场Trigger', '交易计划', '添加时间']
 
 
 def load_state():
@@ -39,6 +43,19 @@ def send_wecom(content):
         print(f"企业微信通知发送失败: {e}")
 
 
+def to_cst(time_str):
+    """将 Notion 抓取的 UTC 时间字符串转为 UTC+8"""
+    if not time_str:
+        return time_str
+    for fmt in ("%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M"):
+        try:
+            dt = datetime.strptime(time_str.strip(), fmt).replace(tzinfo=timezone.utc)
+            return dt.astimezone(TZ_CN).strftime("%Y/%m/%d %H:%M")
+        except ValueError:
+            continue
+    return time_str
+
+
 async def scrape_table():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -60,42 +77,45 @@ async def scrape_table():
             await browser.close()
             raise
 
-        # 滚动到底部确保所有行都已加载
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await asyncio.sleep(3)
+        # 多次滚动确保懒加载的行全部渲染
+        for _ in range(5):
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(2)
 
-        data = await page.evaluate("""() => {
+        col_names_js = json.dumps(SCRAPE_COLS)
+        data = await page.evaluate(f"""() => {{
+            const colNames = {col_names_js};
             const headerCells = document.querySelectorAll('.notion-table-view-header-cell');
             const headers = Array.from(headerCells).map(h => h.textContent.trim());
 
-            if (headers.length === 0) {
-                return { error: 'headers_not_found' };
-            }
+            if (headers.length === 0) {{
+                return {{ error: 'headers_not_found' }};
+            }}
 
-            const colIdx = {};
-            ['币种', '做单方向', '交易状态', '添加时间'].forEach(col => {
+            const colIdx = {{}};
+            colNames.forEach(col => {{
                 colIdx[col] = headers.indexOf(col);
-            });
+            }});
 
             const allRows = document.querySelectorAll('.notion-table-view-row');
             const results = [];
 
-            allRows.forEach(row => {
+            allRows.forEach(row => {{
                 const cells = row.querySelectorAll('.notion-table-view-cell');
                 const cellArr = Array.from(cells).map(c => c.textContent.trim());
 
-                const record = {};
-                for (const [col, idx] of Object.entries(colIdx)) {
+                const record = {{}};
+                for (const [col, idx] of Object.entries(colIdx)) {{
                     record[col] = (idx >= 0 && idx < cellArr.length) ? cellArr[idx] : '';
-                }
+                }}
 
-                if (record['币种'] && record['添加时间']) {
+                if (record['币种'] && record['添加时间']) {{
                     results.push(record);
-                }
-            });
+                }}
+            }});
 
-            return { headers, results };
-        }""")
+            return {{ headers, results }};
+        }}""")
 
         await browser.close()
 
@@ -111,7 +131,7 @@ def make_row_id(row):
 
 
 async def main():
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(TZ_CN).strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] 开始检查...")
 
     try:
@@ -121,6 +141,10 @@ async def main():
         sys.exit(1)
 
     print(f"共抓取 {len(current_rows)} 条记录")
+
+    # 转换时间为 UTC+8
+    for row in current_rows:
+        row['添加时间'] = to_cst(row.get('添加时间', ''))
 
     prev_state = load_state()
 
@@ -145,10 +169,17 @@ async def main():
 
     for row_id, row in current_state.items():
         if row_id not in prev_state:
+            trigger = row.get('入场Trigger', '') or '-'
+            plan = row.get('交易计划', '') or '-'
+            # 交易计划太长时截断
+            if len(plan) > 50:
+                plan = plan[:50] + '...'
             msg = (
                 f"📈 [Notion监控] 新增交易记录\n"
                 f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
                 f"状态：{row.get('交易状态', '-')}\n"
+                f"入场：{trigger}\n"
+                f"计划：{plan}\n"
                 f"时间：{row.get('添加时间', '-')}"
             )
             messages.append(msg)
