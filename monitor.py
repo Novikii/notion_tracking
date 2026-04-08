@@ -171,9 +171,6 @@ async def main():
         if row_id not in prev_state:
             trigger = row.get('入场Trigger', '') or '-'
             plan = row.get('交易计划', '') or '-'
-            # 交易计划太长时截断
-            if len(plan) > 50:
-                plan = plan[:50] + '...'
             msg = (
                 f"📈 [Notion监控] 新增交易记录\n"
                 f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
