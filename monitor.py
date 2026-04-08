@@ -13,7 +13,7 @@ NOTION_URL = "https://road-halibut-51b.notion.site/332e12d2634480f6b247fccac4111
 WECOM_WEBHOOK = os.environ.get("WECOM_WEBHOOK")
 STATE_FILE = "state.json"
 
-SCRAPE_COLS = ['币种', '做单方向', '交易状态', '入场Trigger', '交易计划', '添加时间']
+SCRAPE_COLS = ['币种', '做单方向', '交易状态', '入场Trigger', '交易计划', '添加时间', '最后更新时间']
 
 
 def load_state():
@@ -145,6 +145,7 @@ async def main():
     # 转换时间为 UTC+8
     for row in current_rows:
         row['添加时间'] = to_cst(row.get('添加时间', ''))
+        row['最后更新时间'] = to_cst(row.get('最后更新时间', ''))
 
     prev_state = load_state()
 
@@ -182,17 +183,36 @@ async def main():
             messages.append(msg)
             print(f"新增: {row_id}")
         else:
-            old_status = prev_state[row_id].get("交易状态", "")
+            old = prev_state[row_id]
+            old_status = old.get("交易状态", "")
             new_status = row.get("交易状态", "")
+            old_plan = old.get("交易计划", "")
+            new_plan = row.get("交易计划", "")
+            old_trigger = old.get("入场Trigger", "")
+            new_trigger = row.get("入场Trigger", "")
+            update_time = row.get("最后更新时间", "-")
+
             if old_status and new_status and old_status != new_status:
                 msg = (
                     f"🔄 [Notion监控] 交易状态变更\n"
                     f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
                     f"{old_status} → {new_status}\n"
-                    f"时间：{row.get('添加时间', '-')}"
+                    f"更新时间：{update_time}"
                 )
                 messages.append(msg)
                 print(f"状态变更: {row_id}: {old_status} → {new_status}")
+
+            if (old_plan != new_plan or old_trigger != new_trigger) and (new_plan or new_trigger):
+                msg = (
+                    f"📝 [Notion监控] 交易计划变更\n"
+                    f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
+                    f"状态：{new_status or row.get('交易状态', '-')}\n"
+                    f"入场：{new_trigger or '-'}\n"
+                    f"计划：{new_plan or '-'}\n"
+                    f"更新时间：{update_time}"
+                )
+                messages.append(msg)
+                print(f"计划变更: {row_id}")
 
     if messages:
         for msg in messages:
