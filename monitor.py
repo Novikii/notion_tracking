@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import requests
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from playwright.async_api import async_playwright
 
@@ -14,6 +15,14 @@ WECOM_WEBHOOK = os.environ.get("WECOM_WEBHOOK")
 STATE_FILE = "state.json"
 
 SCRAPE_COLS = ['币种', '做单方向', '交易状态', '入场Trigger', '交易计划', '添加时间', '最后更新时间']
+
+# 合法的状态跳转
+VALID_TRANSITIONS = {
+    "未成交": {"持仓中", "止盈", "止损"},
+    "持仓中": {"止盈", "止损"},
+}
+# 活跃状态（可能继续变更的行）
+ACTIVE_STATUSES = {"未成交", "持仓中"}
 
 
 def load_state():
@@ -131,6 +140,59 @@ def make_row_id(row):
     return f"{row.get('币种', '').strip()}_{time}"
 
 
+def check_and_collect(row, old, messages):
+    """比较新旧行，将需要通知的消息加入 messages"""
+    old_status = old.get("交易状态", "")
+    new_status = row.get("交易状态", "")
+    old_plan = old.get("交易计划", "")
+    new_plan = row.get("交易计划", "")
+    old_trigger = old.get("入场Trigger", "")
+    new_trigger = row.get("入场Trigger", "")
+    update_time = row.get("最后更新时间", "-")
+
+    # 只有合法跳转才算状态变更
+    status_changed = bool(
+        old_status and new_status and
+        new_status in VALID_TRANSITIONS.get(old_status, set())
+    )
+    plan_changed = bool(
+        (old_plan != new_plan or old_trigger != new_trigger) and
+        (new_plan or new_trigger)
+    )
+
+    if status_changed and plan_changed:
+        msg = (
+            f"🔄 [Notion监控] 记录变更\n"
+            f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
+            f"状态：{old_status} → {new_status}\n"
+            f"入场：{new_trigger or '-'}\n"
+            f"计划：{new_plan or '-'}\n"
+            f"更新时间：{update_time}"
+        )
+        messages.append(msg)
+        print(f"状态+计划变更: {row.get('币种')} {row.get('做单方向')}: {old_status} → {new_status}")
+    elif status_changed:
+        msg = (
+            f"🔄 [Notion监控] 交易状态变更\n"
+            f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
+            f"{old_status} → {new_status}\n"
+            f"更新时间：{update_time}"
+        )
+        messages.append(msg)
+        print(f"状态变更: {row.get('币种')} {row.get('做单方向')}: {old_status} → {new_status}")
+    elif plan_changed:
+        msg = (
+            f"📝 [Notion监控] 交易计划变更\n"
+            f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
+            f"状态：{row.get('交易状态', '-')}\n"
+            f"入场：{new_trigger or '-'}\n"
+            f"计划：{new_plan or '-'}\n"
+            f"更新时间：{update_time}"
+        )
+        messages.append(msg)
+        print(f"计划变更: {row.get('币种')} {row.get('做单方向')}")
+
+
 async def main():
     now = datetime.now(TZ_CN).strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] 开始检查...")
@@ -169,64 +231,68 @@ async def main():
 
     messages = []
 
-    for row_id, row in current_state.items():
-        if row_id not in prev_state:
-            trigger = row.get('入场Trigger', '') or '-'
-            plan = row.get('交易计划', '') or '-'
-            msg = (
-                f"📈 [Notion监控] 新增交易记录\n"
-                f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
-                f"状态：{row.get('交易状态', '-')}\n"
-                f"入场：{trigger}\n"
-                f"计划：{plan}\n"
-                f"时间：{row.get('添加时间', '-')}"
-            )
-            messages.append(msg)
-            print(f"新增: {row_id}")
+    # 精确匹配（ID 完全相同）
+    exact_ids = set(current_state) & set(prev_state)
+
+    # 未精确匹配的行
+    orphaned_old = {rid: row for rid, row in prev_state.items() if rid not in exact_ids}
+    new_rows = {rid: row for rid, row in current_state.items() if rid not in exact_ids}
+
+    # 孤儿匹配：只有活跃状态（未成交/持仓中）的旧行才参与
+    active_orphans = {
+        rid: row for rid, row in orphaned_old.items()
+        if row.get("交易状态", "") in ACTIVE_STATUSES
+    }
+
+    # 按 (币种, 做单方向) 分组
+    orphans_by_key = defaultdict(list)
+    for rid, row in active_orphans.items():
+        key = (row.get('币种', ''), row.get('做单方向', ''))
+        orphans_by_key[key].append((rid, row))
+
+    new_by_key = defaultdict(list)
+    for rid, row in new_rows.items():
+        key = (row.get('币种', ''), row.get('做单方向', ''))
+        new_by_key[key].append((rid, row))
+
+    fuzzy_matched = []   # (new_id, old_id, new_row, old_row)
+    truly_new_ids = set()
+
+    for key, new_group in new_by_key.items():
+        orphan_group = orphans_by_key.get(key, [])
+        if len(new_group) == 1 and len(orphan_group) == 1:
+            # 一对一，视为同一行被更新
+            fuzzy_matched.append((new_group[0][0], orphan_group[0][0],
+                                   new_group[0][1], orphan_group[0][1]))
         else:
-            old = prev_state[row_id]
-            old_status = old.get("交易状态", "")
-            new_status = row.get("交易状态", "")
-            old_plan = old.get("交易计划", "")
-            new_plan = row.get("交易计划", "")
-            old_trigger = old.get("入场Trigger", "")
-            new_trigger = row.get("入场Trigger", "")
-            update_time = row.get("最后更新时间", "-")
+            # 无法确定归属，保守处理为新增
+            for new_id, _ in new_group:
+                truly_new_ids.add(new_id)
 
-            status_changed = bool(old_status and new_status and old_status != new_status)
-            plan_changed = bool((old_plan != new_plan or old_trigger != new_trigger) and (new_plan or new_trigger))
+    # 处理精确匹配的行
+    for row_id in exact_ids:
+        check_and_collect(current_state[row_id], prev_state[row_id], messages)
 
-            if status_changed and plan_changed:
-                msg = (
-                    f"🔄 [Notion监控] 记录变更\n"
-                    f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
-                    f"状态：{old_status} → {new_status}\n"
-                    f"入场：{new_trigger or '-'}\n"
-                    f"计划：{new_plan or '-'}\n"
-                    f"更新时间：{update_time}"
-                )
-                messages.append(msg)
-                print(f"状态+计划变更: {row_id}")
-            elif status_changed:
-                msg = (
-                    f"🔄 [Notion监控] 交易状态变更\n"
-                    f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
-                    f"{old_status} → {new_status}\n"
-                    f"更新时间：{update_time}"
-                )
-                messages.append(msg)
-                print(f"状态变更: {row_id}: {old_status} → {new_status}")
-            elif plan_changed:
-                msg = (
-                    f"📝 [Notion监控] 交易计划变更\n"
-                    f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
-                    f"状态：{row.get('交易状态', '-')}\n"
-                    f"入场：{new_trigger or '-'}\n"
-                    f"计划：{new_plan or '-'}\n"
-                    f"更新时间：{update_time}"
-                )
-                messages.append(msg)
-                print(f"计划变更: {row_id}")
+    # 处理孤儿匹配的行
+    for new_id, old_id, new_row, old_row in fuzzy_matched:
+        print(f"孤儿匹配: {old_id} → {new_id}")
+        check_and_collect(new_row, old_row, messages)
+
+    # 处理真正的新增行
+    for row_id in truly_new_ids:
+        row = new_rows[row_id]
+        trigger = row.get('入场Trigger', '') or '-'
+        plan = row.get('交易计划', '') or '-'
+        msg = (
+            f"📈 [Notion监控] 新增交易记录\n"
+            f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
+            f"状态：{row.get('交易状态', '-')}\n"
+            f"入场：{trigger}\n"
+            f"计划：{plan}\n"
+            f"时间：{row.get('添加时间', '-')}"
+        )
+        messages.append(msg)
+        print(f"新增: {row_id}")
 
     if messages:
         for msg in messages:
