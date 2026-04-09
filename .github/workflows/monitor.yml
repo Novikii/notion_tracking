@@ -1,8 +1,6 @@
 name: Notion Monitor
 
 on:
-  schedule:
-    - cron: '*/15 * * * *'
   workflow_dispatch:
   push:
     branches: [main]
