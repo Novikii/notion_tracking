@@ -4,7 +4,6 @@ import json
 import os
 import sys
 import requests
-from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from playwright.async_api import async_playwright
 
@@ -21,8 +20,6 @@ VALID_TRANSITIONS = {
     "未成交": {"持仓中", "止盈", "止损"},
     "持仓中": {"止盈", "止损"},
 }
-# 活跃状态（可能继续变更的行）
-ACTIVE_STATUSES = {"未成交", "持仓中"}
 
 
 def load_state():
@@ -136,6 +133,7 @@ async def scrape_table():
 
 
 def make_row_id(row):
+    """以 添加时间 为主，fallback 到 最后更新时间"""
     time = row.get('添加时间', '').strip() or row.get('最后更新时间', '').strip()
     return f"{row.get('币种', '').strip()}_{time}"
 
@@ -231,68 +229,23 @@ async def main():
 
     messages = []
 
-    # 精确匹配（ID 完全相同）
-    exact_ids = set(current_state) & set(prev_state)
-
-    # 未精确匹配的行
-    orphaned_old = {rid: row for rid, row in prev_state.items() if rid not in exact_ids}
-    new_rows = {rid: row for rid, row in current_state.items() if rid not in exact_ids}
-
-    # 孤儿匹配：只有活跃状态（未成交/持仓中）的旧行才参与
-    active_orphans = {
-        rid: row for rid, row in orphaned_old.items()
-        if row.get("交易状态", "") in ACTIVE_STATUSES
-    }
-
-    # 按 (币种, 做单方向) 分组
-    orphans_by_key = defaultdict(list)
-    for rid, row in active_orphans.items():
-        key = (row.get('币种', ''), row.get('做单方向', ''))
-        orphans_by_key[key].append((rid, row))
-
-    new_by_key = defaultdict(list)
-    for rid, row in new_rows.items():
-        key = (row.get('币种', ''), row.get('做单方向', ''))
-        new_by_key[key].append((rid, row))
-
-    fuzzy_matched = []   # (new_id, old_id, new_row, old_row)
-    truly_new_ids = set()
-
-    for key, new_group in new_by_key.items():
-        orphan_group = orphans_by_key.get(key, [])
-        if len(new_group) == 1 and len(orphan_group) == 1:
-            # 一对一，视为同一行被更新
-            fuzzy_matched.append((new_group[0][0], orphan_group[0][0],
-                                   new_group[0][1], orphan_group[0][1]))
+    for row_id, row in current_state.items():
+        if row_id not in prev_state:
+            # 新增行
+            trigger = row.get('入场Trigger', '') or '-'
+            plan = row.get('交易计划', '') or '-'
+            msg = (
+                f"📈 [Notion监控] 新增交易记录\n"
+                f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
+                f"状态：{row.get('交易状态', '-')}\n"
+                f"入场：{trigger}\n"
+                f"计划：{plan}\n"
+                f"更新时间：{row.get('最后更新时间', '-')}"
+            )
+            messages.append(msg)
+            print(f"新增: {row_id}")
         else:
-            # 无法确定归属，保守处理为新增
-            for new_id, _ in new_group:
-                truly_new_ids.add(new_id)
-
-    # 处理精确匹配的行
-    for row_id in exact_ids:
-        check_and_collect(current_state[row_id], prev_state[row_id], messages)
-
-    # 处理孤儿匹配的行
-    for new_id, old_id, new_row, old_row in fuzzy_matched:
-        print(f"孤儿匹配: {old_id} → {new_id}")
-        check_and_collect(new_row, old_row, messages)
-
-    # 处理真正的新增行
-    for row_id in truly_new_ids:
-        row = new_rows[row_id]
-        trigger = row.get('入场Trigger', '') or '-'
-        plan = row.get('交易计划', '') or '-'
-        msg = (
-            f"📈 [Notion监控] 新增交易记录\n"
-            f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
-            f"状态：{row.get('交易状态', '-')}\n"
-            f"入场：{trigger}\n"
-            f"计划：{plan}\n"
-            f"更新时间：{row.get('最后更新时间', '-')}"
-        )
-        messages.append(msg)
-        print(f"新增: {row_id}")
+            check_and_collect(row, prev_state[row_id], messages)
 
     if messages:
         for msg in messages:
