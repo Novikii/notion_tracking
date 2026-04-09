@@ -289,7 +289,7 @@ async def main():
             f"状态：{row.get('交易状态', '-')}\n"
             f"入场：{trigger}\n"
             f"计划：{plan}\n"
-            f"时间：{row.get('添加时间', '-')}"
+            f"更新时间：{row.get('最后更新时间', '-')}"
         )
         messages.append(msg)
         print(f"新增: {row_id}")
