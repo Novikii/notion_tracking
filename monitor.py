@@ -138,6 +138,18 @@ def make_row_id(row):
     return f"{row.get('币种', '').strip()}_{time}"
 
 
+def is_recent(row, hours=24):
+    """新增行只有在 hours 小时内才算真正新增，防止基准漏抓导致的误报"""
+    time_str = (row.get('添加时间', '').strip() or row.get('最后更新时间', '').strip())
+    if not time_str:
+        return False
+    try:
+        dt = datetime.strptime(time_str, "%Y/%m/%d %H:%M").replace(tzinfo=TZ_CN)
+        return (datetime.now(TZ_CN) - dt).total_seconds() < hours * 3600
+    except ValueError:
+        return False
+
+
 def check_and_collect(row, old, messages):
     """比较新旧行，将需要通知的消息加入 messages"""
     old_status = old.get("交易状态", "")
@@ -231,19 +243,23 @@ async def main():
 
     for row_id, row in current_state.items():
         if row_id not in prev_state:
-            # 新增行
-            trigger = row.get('入场Trigger', '') or '-'
-            plan = row.get('交易计划', '') or '-'
-            msg = (
-                f"📈 [Notion监控] 新增交易记录\n"
-                f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
-                f"状态：{row.get('交易状态', '-')}\n"
-                f"入场：{trigger}\n"
-                f"计划：{plan}\n"
-                f"更新时间：{row.get('最后更新时间', '-')}"
-            )
-            messages.append(msg)
-            print(f"新增: {row_id}")
+            if not is_recent(row):
+                # 旧记录（基准漏抓），静默加入状态，不通知
+                print(f"跳过旧记录（非近24h）: {row_id}")
+            else:
+                # 真正的新增行
+                trigger = row.get('入场Trigger', '') or '-'
+                plan = row.get('交易计划', '') or '-'
+                msg = (
+                    f"📈 [Notion监控] 新增交易记录\n"
+                    f"币种：{row.get('币种', '-')}  方向：{row.get('做单方向', '-')}\n"
+                    f"状态：{row.get('交易状态', '-')}\n"
+                    f"入场：{trigger}\n"
+                    f"计划：{plan}\n"
+                    f"更新时间：{row.get('最后更新时间', '-')}"
+                )
+                messages.append(msg)
+                print(f"新增: {row_id}")
         else:
             check_and_collect(row, prev_state[row_id], messages)
 
